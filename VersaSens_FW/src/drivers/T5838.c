@@ -74,7 +74,7 @@ Description : Original version.
 LOG_MODULE_REGISTER(t5838, LOG_LEVEL_INF);
 
 /*!< Size of the buffer for PDM frames */
-#define PDM_BUFFER_SIZE        480    
+#define PDM_BUFFER_SIZE        240    
 
 // T5838 storage format header
 #define T5838_STORAGE_HEADER 0xAAAA
@@ -221,7 +221,7 @@ int t5838_init(void)
 
     /*! Set the PDM configuration */
     nrfx_pdm_config_t pdm_config = NRFX_PDM_DEFAULT_CONFIG(PDM_CLK_PIN, PDM_DATA_PIN);
-    pdm_config.mode = NRF_PDM_MODE_MONO;
+    pdm_config.mode = NRF_PDM_MODE_STEREO;
     pdm_config.edge = NRF_PDM_EDGE_LEFTFALLING;
 
     // f_pdm = 768000
@@ -268,29 +268,18 @@ void t5838_stop_saving(void)
 
 void t5838_save_thread_func(void *arg1, void *arg2, void *arg3)
 {
-    /* Initialize Opus Encoder */
     int error;
-    OpusEncoder *encoder = opus_encoder_create(12000, 1, OPUS_APPLICATION_AUDIO, &error);
-    if (error != OPUS_OK) {
-        LOG_ERR("Opus encoder initialization error: %s\n", opus_strerror(error));
-        return;
-    }
-    LOG_INF("Opus encoder initialized\n");
 
-    /* Configure Opus Encoder */
-    error = opus_encoder_ctl(encoder, OPUS_SET_COMPLEXITY(OPUS_COMPLEXITY), OPUS_SET_VBR(OPUS_VBR));
-    if (error != OPUS_OK) {
-        LOG_ERR("Opus encoder configuration error: %s\n", opus_strerror(error));
-        return;
-    }
-    LOG_INF("Opus encoder configured\n");
+    uint8_t frame_index = 0;                           /*!< Frame sequence index */
+    storage_format.header = 0xAAAA;                    /*!< Storage header marker */
 
-    int16_t compressed_frame[PDM_BUFFER_SIZE] = {0};    /*!< Compressed output buffer */
-    uint8_t frame_index = 0;                            /*!< Frame sequence index */
-    storage_format.header = T5838_STORAGE_HEADER;       /*!< Storage header marker */
 
     bool *frame_flags[] = {&frame1_new, &frame2_new, &frame3_new};  /*!< Pointers to frame flags */
     int16_t *frames[] = {t5838_frames.frame1, t5838_frames.frame2, t5838_frames.frame3};  /*!< Frame pointers */
+
+
+    uint16_t len = PDM_BUFFER_SIZE;
+
 
     /* Main loop to handle new frames */
     while (!save_thread_stop) {
@@ -298,26 +287,24 @@ void t5838_save_thread_func(void *arg1, void *arg2, void *arg3)
         storage_format.rawtime_bin = current_time.rawtime_s_bin;
         storage_format.time_ms_bin = current_time.time_ms_bin;
 
+
         for (int i = 0; i < 3; i++) {
             if (*frame_flags[i]) {
                 *frame_flags[i] = false;
 
-                /* Encode frame using Opus */
-                int start_time = k_uptime_get();
-                uint8_t len = (uint8_t)opus_encode(encoder, frames[i], PDM_BUFFER_SIZE, compressed_frame, PDM_BUFFER_SIZE) * sizeof(int16_t);
-                int end_time = k_uptime_get();
-                printk("Encoding time: %d ms\n", end_time - start_time);
 
                 /* Store encoded data in storage format structure */
                 storage_format.len = len + 1;
                 storage_format.index = frame_index++;
-                memcpy(storage_format.data, compressed_frame, len);
+                memcpy(storage_format.data, frames[i], len);
+
 
                 /* Store and add data to buffers */
                 int ret = storage_add_to_fifo((uint8_t *)&storage_format, len + STORAGE_SIZE_HEADER);
                 if (ret != 0) {
                     LOG_ERR("Error writing to flash\n");
                 }
+
 
                 /* Add to BLE and optional SPI Heep if configured */
                 ble_add_to_fifo((uint8_t *)&storage_format, len + STORAGE_SIZE_HEADER);
@@ -328,16 +315,19 @@ void t5838_save_thread_func(void *arg1, void *arg2, void *arg3)
                     app_data_add_to_fifo((uint8_t *)&storage_format, len + STORAGE_SIZE_HEADER);
                 }
 
+
                 printk("Processed Frame %d, Length: %d bytes\n", i + 1, len);
             }
         }
 
+
         k_sleep(K_MSEC(10));  /*!< Sleep briefly before checking for new frames */
     }
 
-    opus_encoder_destroy(encoder);
+
     k_thread_abort(k_current_get());
 }
+
 
 /****************************************************************************/
 /**                                                                        **/
